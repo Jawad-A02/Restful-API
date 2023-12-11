@@ -1,24 +1,27 @@
 const express = require('express');
-const app = express();
+const bodyParser = require('body-parser');
+const router = express.Router();
 const cors = require('cors');
 
-const {Datastore} = require('@google-cloud/datastore');
+const lds = require('./loads');
 
-const bodyParser = require('body-parser');
+const ds = require('./datastore');
+const { entity } = require('@google-cloud/datastore/build/src/entity');
 
-const datastore = new Datastore();
+const datastore = ds.datastore;
+
+const LOAD = "Load";
+
+router.use(bodyParser.json());
 
 const jwt = require('express-jwt');
 const jwksRsa = require('jwks-rsa');
 
-const BOAT = "Boat";
+const User = "User";
 const CLIENT_ID = 'tDzXifN90K0CkCOUPEZVTJKJPLkGy7sk';
 const CLIENT_SECRET = 'C4ohR_A6pD1U6vwC3WuoWIxwGptovMrSG4WWvkVPtWF3cjq55uo2pcNFb_RHj8OR';
 const DOMAIN = 'abdullaj-hw7.us.auth0.com';
 
-
-const router = express.Router();
-const owner = express.Router();
 
 const { auth } = require('express-openid-connect');
 
@@ -28,7 +31,7 @@ const config = {
   baseURL: 'http://localhost:8080',
   clientID: `${CLIENT_ID}`,
   issuerBaseURL: `https://${DOMAIN}`,
-  secret: 'A_VERY_SUPER_SECRECT'
+  secret: CLIENT_SECRET
 };
 
 // auth router attaches /login, /logout, and /callback routes to the baseURL
@@ -73,10 +76,10 @@ const checkJwt = jwt({
 
 
 /* ------------- Begin Lodging Model Functions ------------- */
-async function post_boat(req, name, type, length, public, owner) {
+async function post_user(req, name, sub) {
     try {
-        const key = datastore.key(BOAT);
-        const data = { "name": name, "type": type, "length": length, "public": public, "owner": owner};
+        const key = datastore.key(User, sub);
+        const data = { "name": name, "token": req.oidc.idToken, "sub": sub};
         let id;
 
         await datastore.save({ "key": key, "data": data });
@@ -92,24 +95,32 @@ async function post_boat(req, name, type, length, public, owner) {
     }
 }
 
+// async function post_boat(req, name, type, length, public, owner) {
+//     try {
+//         const key = datastore.key(BOAT);
+//         const data = { "name": name, "type": type, "length": length, "public": public, "owner": owner};
+//         let id;
 
-async function get_boats(owner, public) {
+//         await datastore.save({ "key": key, "data": data });
+//         id = key.id;
+//         data.self = `${req.protocol}://${req.get("host")}${req.baseUrl}/${id}`;
+//         await datastore.save({ "key": key, "data": data });
+
+//         return key;
+//     } catch (error) {
+//         // Handle errors here
+//         console.error(error);
+//         throw error; // Rethrow the error for the caller to handle if needed
+//     }
+// }
+
+
+async function get_users() {
     try {
-        const q = datastore.createQuery(BOAT);
+        const q = datastore.createQuery(User);
         const entities = await datastore.runQuery(q);
-        const boats = await Promise.all(entities[0]);
-        let promises
-        if (public === "owner-public") {        
-            promises = boats.map(fromDatastore).filter( item => 
-                item.owner === owner && item.public === true);
-        } else if (public === "owner") {
-            promises = boats.map(fromDatastore).filter( item => 
-                item.owner === owner) 
-        } else {
-            promises = boats.map(fromDatastore).filter( item =>
-                item.public === true)
-        }
-
+        const users = await Promise.all(entities[0]);
+        const promises = users.map(fromDatastore);
         return promises;
     } catch (err) {
         throw err; // Rethrow the error for the caller to handle if needed
@@ -147,94 +158,114 @@ function del_boat(id) {
 /* ------------- Begin Controller Functions ------------- */
 
 // req.isAuthenticated is provided from the auth router
-app.get('/', (req, res) => {
+router.get('/login', (req, res) => {
     if (req.oidc.isAuthenticated()) {
-       return res.redirect('/profile');
+       return res.redirect('/users/profile');
     }
-    res.send('Logged out');
+    res.status(401).json({"Error": "Not logged in"});
  });
 
 
-app.get('/profile', requiresAuth(), (req, res) => {
-    res.send(JSON.stringify(req.oidc.idToken));
-});
-
-
-router.get('/', checkJwt, async function(req, res){
-    const boats = await get_boats(req.user.sub, "owner")
-	res.status(200).json(boats);
-});
-
-router.use(async (err, req, res, next) => {
-    if (err.name === 'UnauthorizedError') {
-
-        const boats = await get_boats(null, "public")
-        res.status(200).json(boats);
-    } else {
-        next(err); // Pass other errors to the default error handler
-    }
-});
-
-router.delete('/:id', checkJwt, async function(req, res) {
+router.get('/profile', requiresAuth(), async(req, res) => {
     try {
-        const boat = await get_boat(req.params.id);
-        if (boat[0] == undefined || boat[0] == null || boat[0].owner !== req.user.sub) {
-            res.status(403).json({"Error": "No boat with this boat_id exists\\it is owned by someone else"});
-        } else {
-            del_boat(req.params.id);
-            res.status(204).end();
-        }
-    } catch (error) {
+        const user = await post_user(req, req.oidc.user.name, req.oidc.user.sub);
+        res.send(JSON.stringify(req.oidc.idToken) + "\n" + JSON.stringify(user.id));
+    } catch {
         console.log(error);
         res.status(500).end();
     }
 });
 
 
-owner.param('owner_id', function(req, res, next, owner_id) {
-    // You can perform additional logic or validation here if needed
-    req.owner_id = owner_id; // Attach the parameter to the request object
-    next();
-});
-
-owner.get('/:owner_id/boats', checkJwt, async function(req, res, next){
-    
-    const boats = await get_boats(req.owner_id, "owner-public");
-    res.status(200).json(boats);
-});
-
-owner.use(async (err, req, res, next) => {
-    if (err.name === 'UnauthorizedError') {
-        const boats = await get_boats(req.owner_id, "owner-public");
-        res.status(200).json(boats);
-    } else {
-      next(err); // Pass other errors to the default error handler
+router.get('/', async function(req, res){
+    // Check if the request body is acceptable
+    const accepts = req.accepts(['application/json']);
+    if (!accepts) {
+        res.status(406).send({
+            "Error": "Not acceptable"
+        })
+        return;
     }
+    const users = await get_users();
+    res.status(200).json(users);
 });
 
+// router.get('/', checkJwt, async function(req, res){
+//     const boats = await get_boats(req.user.sub, "owner")
+// 	res.status(200).json(boats);
+// });
 
-router.post('/', checkJwt, async function(req, res){
-    try {
 
-        if(req.get('content-type') !== 'application/json'){
-            res.status(415).send('Server only accepts application/json data.')
-        }
+// router.use(async (err, req, res, next) => {
+//     if (err.name === 'UnauthorizedError') {
 
-        const name = req.body.name;
-        const type = req.body.type;
-        const length = req.body.length;
-        const public = req.body.public;
-        const owner = req.user.sub;
+//         const boats = await get_boats(null, "public")
+//         res.status(200).json(boats);
+//     } else {
+//         next(err); // Pass other errors to the default error handler
+//     }
+// });
+
+// router.delete('/:id', checkJwt, async function(req, res) {
+//     try {
+//         const boat = await get_boat(req.params.id);
+//         if (boat[0] == undefined || boat[0] == null || boat[0].owner !== req.user.sub) {
+//             res.status(403).json({"Error": "No boat with this boat_id exists\\it is owned by someone else"});
+//         } else {
+//             del_boat(req.params.id);
+//             res.status(204).end();
+//         }
+//     } catch (error) {
+//         console.log(error);
+//         res.status(500).end();
+//     }
+// });
+
+
+// owner.param('owner_id', function(req, res, next, owner_id) {
+//     // You can perform additional logic or validation here if needed
+//     req.owner_id = owner_id; // Attach the parameter to the request object
+//     next();
+// });
+
+// owner.get('/:owner_id/boats', checkJwt, async function(req, res, next){
+    
+//     const boats = await get_boats(req.owner_id, "owner-public");
+//     res.status(200).json(boats);
+// });
+
+// owner.use(async (err, req, res, next) => {
+//     if (err.name === 'UnauthorizedError') {
+//         const boats = await get_boats(req.owner_id, "owner-public");
+//         res.status(200).json(boats);
+//     } else {
+//       next(err); // Pass other errors to the default error handler
+//     }
+// });
+
+
+// router.post('/', checkJwt, async function(req, res){
+//     try {
+
+//         if(req.get('content-type') !== 'application/json'){
+//             res.status(415).send('Server only accepts application/json data.')
+//         }
+
+//         const name = req.body.name;
+//         const type = req.body.type;
+//         const length = req.body.length;
+//         const public = req.body.public;
+//         const owner = req.user.sub;
 
         
 
-        const key = await post_boat(req, name, type, length, public, owner)
-        res.status(201).json({"id": key.id});
-    } catch (err) {
-        console.log(err);
-        res.status(500).end();
-    }
-});
+//         const key = await post_boat(req, name, type, length, public, owner)
+//         res.status(201).json({"id": key.id});
+//     } catch (err) {
+//         console.log(err);
+//         res.status(500).end();
+//     }
+// });
 
 router.use((err, req, res, next) => {
     if (err.name === 'UnauthorizedError') {
