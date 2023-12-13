@@ -106,16 +106,22 @@ async function edit_load(id, data) {
     }
 }
 
+
+function accept_json(req) {
+    const accepts = req.accepts(['application/json']);
+    if (!accepts) {
+        return false;
+    } else {
+        return true;
+    }
+};
 /* ------------- End Model Functions ------------- */
 
 /* ------------- Begin Controller Functions ------------- */
 
 router.get('/', async function(req, res) {
-    const accepts = req.accepts(['application/json']);
-    if (!accepts) {
-        res.status(406).send({
-            "Error": "Not acceptable"
-        })
+    if (!accept_json(req)) {
+        res.status(406).send({"Error": "Not acceptable"})
         return;
     }
     const loads = await get_loads(req)
@@ -126,27 +132,24 @@ router.get('/', async function(req, res) {
 router.post('/', async function(req, res){
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
 
-        const volume = undefined;
-        const item = undefined;
-        const date = undefined;
-
+        const volume = req.body.volume;
+        const item = req.body.item;
+        const date = req.body.creation_date;
+        if (volume === undefined || item === undefined || date === undefined) {
+            res.status(400).send({
+                "Error": "The request object is missing at least one of the required attributes"
+            })
+            return;
+        }
+        // Check if the request body contains all the required attributes
         for (let key in req.body) {
-            if (key === "volume") {
-                load[0].volume = req.body[key];
-            } else if (key === "item") {
-                load[0].item = req.body[key];
-            } else if (key === "date") {
-                load[0].date = req.body[key]
-            } else {
-                res.status(400).json({"Error": "The request object contains at least one unaccepted attributes"})
+            if (key !== "volume" && key !== "item" && key !== "creation_date") {
+                res.status(400).json({"Error": "The request object contains at least one unaccepted attribute"});
                 return;
             }
         }
@@ -165,13 +168,11 @@ router.post('/', async function(req, res){
 router.get('/:id', async function (req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-            "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
         const load = await get_load(req.params.id);
         if (load[0] == undefined || load[0] == null) {
             res.status(403).json({ 'Error': 'No load with this load_id exists' });
@@ -188,13 +189,11 @@ router.get('/:id', async function (req, res) {
 router.put('/:id', async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
         if(req.get('content-type') !== 'application/json'){
             res.status(415).json({"Error": 'Server only accepts application/json data.'});
             return;
@@ -204,7 +203,7 @@ router.put('/:id', async function(req, res) {
         if (load[0] == undefined || load[0] == null) {
             res.status(403).json({"Error": "The specified load does not exist"});
         } else {
-                if (!req.body.volume || !req.body.item || !req.body.date) {
+                if (!req.body.volume || !req.body.item || !req.body.creation_date) {
                     res.status(400).json({
                         "Error": "The request object is missing at least one of the required attributes"
                     })
@@ -216,8 +215,8 @@ router.put('/:id', async function(req, res) {
                     load[0].volume = req.body[key];
                 } else if (key === "item") {
                     load[0].item = req.body[key];
-                } else if (key === "date") {
-                    load[0].date = req.body[key]
+                } else if (key === "creation_date") {
+                    load[0].creation_date = req.body[key]
                 } else {
                     res.status(400).json({"Error": "The request object contains at least one unaccepted attributes"})
                     return;
@@ -237,13 +236,11 @@ router.put('/:id', async function(req, res) {
 router.patch('/:id', async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
         if(req.get('content-type') !== 'application/json'){
             res.status(415).json({"Error": 'Server only accepts application/json data.'});
             return;
@@ -259,8 +256,8 @@ router.patch('/:id', async function(req, res) {
                     load[0].volume = req.body[key];
                 } else if (key === "item") {
                     load[0].item = req.body[key];
-                } else if (key === "date") {
-                    load[0].date = req.body[key]
+                } else if (key === "creation_date") {
+                    load[0].creation_date = req.body[key]
                 } else {
                     res.status(400).json({"Error": "The request object contains at least one unaccepted attributes"})
                     return;

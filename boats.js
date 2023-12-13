@@ -1,7 +1,9 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const router = express.Router();
-
+const cors = require('cors');
+const jwt = require('express-jwt');
+const jwksRsa = require('jwks-rsa');
 const lds = require('./loads');
 
 const ds = require('./datastore');
@@ -9,12 +11,12 @@ const { entity } = require('@google-cloud/datastore/build/src/entity');
 
 const datastore = ds.datastore;
 
+const USER = "User";
 const BOAT = "Boat";
 const LOAD = "Load";
 
 router.use(bodyParser.json());
-const jwt = require('express-jwt');
-const jwksRsa = require('jwks-rsa');
+
 const CLIENT_ID = 'tDzXifN90K0CkCOUPEZVTJKJPLkGy7sk';
 const CLIENT_SECRET = 'C4ohR_A6pD1U6vwC3WuoWIxwGptovMrSG4WWvkVPtWF3cjq55uo2pcNFb_RHj8OR';
 const DOMAIN = 'abdullaj-hw7.us.auth0.com';
@@ -33,7 +35,7 @@ const checkJwt = jwt({
     algorithms: ['RS256']
   });
 
-/* ------------- Begin guest Model Functions ------------- */
+/* ------------- Begin boat Model Functions ------------- */
 
 async function post_boat(req, name, type, length, owner) {
     try {
@@ -45,6 +47,13 @@ async function post_boat(req, name, type, length, owner) {
         id = key.id;
         data.self = `${req.protocol}://${req.get("host")}${req.baseUrl}/${id}`;
         await datastore.save({ "key": key, "data": data });
+        
+        const users = await get_users();
+        const filtered = users.filter((user) => user.sub === 'google-oauth2|114935712250840892898')
+        data.id = id;
+        filtered[0].boats.push(data);
+        const user_key = datastore.key([USER, parseInt(filtered[0].id, 10)]);
+        await datastore.save({"key": user_key, "data": filtered[0]});
 
         return key;
     } catch (error) {
@@ -52,9 +61,9 @@ async function post_boat(req, name, type, length, owner) {
     }
 }
 
-function get_boats(req, owner) {
+async function get_boats(req, owner) {
     const q = datastore.createQuery(BOAT)
-        .filter("sub", "=", owner)
+        .filter("owner", "=", owner)
         .limit(5);
 
     const results = {};
@@ -63,15 +72,14 @@ function get_boats(req, owner) {
         q.start(req.query.cursor);
     }
 
-    return datastore.runQuery(q).then((entities) => {
-        results.boats = entities[0].map(ds.fromDatastore);
+    const entities = await datastore.runQuery(q);
+    results.boats = entities[0].map(ds.fromDatastore);
 
-        if (entities[1].moreResults !== ds.Datastore.NO_MORE_RESULTS) {
-            results.next = req.protocol + "://" + req.get("host") + req.baseUrl + "?cursor=" + entities[1].endCursor;
-        }
+    if (entities[1].moreResults !== ds.Datastore.NO_MORE_RESULTS) {
+        results.next = req.protocol + "://" + req.get("host") + req.baseUrl + "?cursor=" + entities[1].endCursor;
+    }
 
-        return results;
-    });
+    return results;
 }
 
 function get_boat(id) {
@@ -88,6 +96,18 @@ function get_boat(id) {
     });
 }
 
+async function get_users() {
+    try {
+        const q = datastore.createQuery(USER);
+        const entities = await datastore.runQuery(q);
+        const users = await Promise.all(entities[0]);
+        const promises = users.map(ds.fromDatastore);
+        return promises;
+    } catch (err) {
+        throw err; // Rethrow the error for the caller to handle if needed
+    }
+}
+
 function get_load(id) {
     const key = datastore.key([LOAD, parseInt(id, 10)]);
     return datastore.get(key).then((entity) => {
@@ -102,6 +122,8 @@ function get_load(id) {
     });
 }
 
+
+
 async function put_boat_load(id, loadid) {
     try {
         const load = await get_load(loadid);
@@ -110,7 +132,7 @@ async function put_boat_load(id, loadid) {
         } else {
             const boat = await get_boat(id);
             console.log(load[0].id);
-            boat[0].loads.push({"load":load[0]});
+            boat[0].loads.push(load[0]);
 
             const boat_key = datastore.key([BOAT, parseInt(id, 10)]);
             await datastore.save({"key": boat_key, "data": boat[0]});
@@ -172,9 +194,26 @@ async function del_boat(id) {
                 const load_key = await datastore.key([LOAD, parseInt(ids[i], 10)]);
                 await datastore.save({"key": load_key, "data": load[0]});
             }
-        }
+        }    
     }
+    await del_user_boat(id, boat[0].owner);
     return datastore.delete(key);
+
+}
+
+async function del_user_boat(id, sub) {
+    const users = await get_users();
+    
+    // Find the user with the given 'sub'
+    const userIndex = users.findIndex((user) => user.sub === sub);
+    const boatIndex = users[userIndex].boats.findIndex((boat) => boat.id === id);
+    
+    // Remove the boat from the user's boats array
+    users[userIndex].boats.splice(boatIndex, 1);
+    
+    // Save the updated user to the datastore
+    const userKey = datastore.key([USER, parseInt(users[userIndex].id, 10)]);
+    await datastore.save({ "key": userKey, "data": users[userIndex] });
 }
 
 async function edit_boat(id, data) {
@@ -188,19 +227,26 @@ async function edit_boat(id, data) {
     }
 }
 
+function accept_json(req) {
+    const accepts = req.accepts(['application/json']);
+    if (!accepts) {
+        return false;
+    } else {
+        return true;
+    }
+};
 /* ------------- End Model Functions ------------- */
 
 /* ------------- Begin Controller Functions ------------- */
 
 router.get('/', checkJwt, async function(req, res){
     // Check if the request body is acceptable
-    const accepts = req.accepts(['application/json']);
-    if (!accepts) {
-        res.status(406).send({
-            "Error": "Not acceptable"
-        })
+    if (!accept_json(req)) {
+        res.status(406).send({"Error": "Not acceptable"})
         return;
     }
+
+    console.log(req.user.sub);
     const boats = await get_boats(req, req.user.sub)
     res.contentType("application/json");
 	res.status(200).json(boats);
@@ -217,29 +263,25 @@ router.use(async (err, req, res, next) => {
 
 router.post('/', checkJwt, async function(req, res){
     try {
-
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).json({
-                "Error": "Not acceptable"
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
+            return;
+        }
+        let name = req.body.name;
+        let type = req.body.type;
+        let length = req.body.length;
+        let owner = req.user.sub;
+        if (name === undefined || type === undefined || length === undefined) {
+            res.status(400).json({
+                "Error": "The request object is missing at least one of the required attributes"
             })
             return;
         }
-        let name = undefined;
-        let type = undefined;
-        let length = undefined;
-        let owner = req.user.sub;
 
         // Check if the request body contains all the required attributes
         for (let key in req.body) {
-            if (key === "name") {
-                name = req.body[key];
-            } else if (key === "type") {
-                type = req.body[key];
-            } else if (key === "length") {
-                length = req.body[key];
-            } else {
+            if (key !== "name" && key !== "type" && key !== "length") {
                 res.status(400).json({"Error": "The request object contains at least one unaccepted attribute"});
                 return;
             }
@@ -247,25 +289,23 @@ router.post('/', checkJwt, async function(req, res){
 
         const key = await post_boat(req, name, type, length, owner);
         const boat = await get_boat(key.id);
-        res.location(req.protocol + "://" + req.get('host') + req.baseUrl + '/' + key.id);
-        res.contentType("application/json");
-        res.status(201).json({boat});
+        res.status(201).json(boat[0]);
     } catch (err) {
         console.log(err);
     }
 });
 
-router.get('/:id', checkJwt, async function (req, res) {
+
+router.get('/:boat_id', checkJwt, async function (req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
-        const boat = await get_boat(req.params.id);
+
+        const boat = await get_boat(req.params.boat_id);  // Use req.params.boat_id here
+
         if (boat[0] == undefined || boat[0] == null || boat[0].owner !== req.user.sub) {
             res.status(403).json({"Error": "The specified boat and/or load does not exist\\it is owned by someone else"});
         } else {
@@ -281,13 +321,11 @@ router.get('/:id', checkJwt, async function (req, res) {
 router.put('/:id', checkJwt, async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
         if(req.get('content-type') !== 'application/json'){
             res.status(415).json({"Error": 'Server only accepts application/json data.'});
             return;
@@ -331,14 +369,14 @@ router.put('/:id', checkJwt, async function(req, res) {
 router.put('/:id/loads/:loadid', checkJwt, async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
+        console.log(req.params.id);
         const boat = await get_boat(req.params.id);
+        console.log(boat);
         if (boat[0] == undefined || boat[0] == null || boat[0].owner !== req.user.sub) {
             res.status(403).json({"Error": "The specified boat and/or load does not exist\\it is owned by someone else"});
         } else {
@@ -363,13 +401,11 @@ router.put('/:id/loads/:loadid', checkJwt, async function(req, res) {
 router.patch('/:id', checkJwt, async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
+
         if(req.get('content-type') !== 'application/json'){
             res.status(415).json({"Error": 'Server only accepts application/json data.'});
             return;
@@ -446,11 +482,8 @@ router.delete('/:id',checkJwt, async function(req, res) {
 router.get('/:id/loads', checkJwt, async function(req, res) {
     try {
         // Check if the request body is acceptable
-        const accepts = req.accepts(['application/json']);
-        if (!accepts) {
-            res.status(406).send({
-                "Error": "Not acceptable"
-            })
+        if (!accept_json(req)) {
+            res.status(406).send({"Error": "Not acceptable"})
             return;
         }
         const boat = await get_boat(req.params.id);
